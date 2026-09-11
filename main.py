@@ -8,8 +8,8 @@ from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import Plain, Record
 from astrbot.core.platform import AstrMessageEvent
 
-from .core.client import GSVApiClient, GSVRequestResult
-from .core.config import PluginConfig
+from .core.client import GSVClientPool, GSVRequestResult
+from .core.config import PluginConfig, VoiceProfile
 from .core.emotion import EmotionJudger
 from .core.entry import EntryManager
 from .core.local_data import LocalDataManager
@@ -22,16 +22,29 @@ class GPTSoVITSPlugin(Star):
         self.cfg = PluginConfig(config, context)
         self.local_data = LocalDataManager(self.cfg)
         self.entry_mgr = EntryManager(self.cfg)
-        self.client = GSVApiClient(self.cfg)
+        self.pool = GSVClientPool(self.cfg)
         self.judger = EmotionJudger(self.cfg)
-        self.service = GPTSoVITSService(self.cfg, self.client, self.local_data)
+        self.service = GPTSoVITSService(self.cfg, self.pool, self.local_data)
 
     async def initialize(self):
         if self.cfg.enabled:
             await self.service.load_model()
 
     async def terminate(self):
-        await self.client.close()
+        await self.pool.close()
+
+    @staticmethod
+    def _self_id(event: AstrMessageEvent) -> str:
+        """取当前机器人的 QQ 号，用于匹配音色档案"""
+
+        try:
+            self_id = event.get_self_id()
+        except Exception:
+            self_id = getattr(event, "self_id", "")
+        return str(self_id or "").strip()
+
+    def _resolve_profile(self, event: AstrMessageEvent) -> VoiceProfile | None:
+        return self.cfg.match_profile(self._self_id(event))
 
     @staticmethod
     def _to_record(res: GSVRequestResult) -> Record:
@@ -50,7 +63,10 @@ class GPTSoVITSPlugin(Star):
 
 
     async def _get_emotion_params(
-        self, event: AstrMessageEvent, text: str
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        profile: VoiceProfile | None = None,
     ) -> dict | None:
         entry = None
 
@@ -63,7 +79,18 @@ class GPTSoVITSPlugin(Star):
         if entry is None:
             entry = self.entry_mgr.match_entry(text)
 
-        return entry.to_params() if entry else None
+        if entry is None:
+            return None
+
+        params = entry.to_params()
+
+        # 音色档案默认锁死参考音频，情绪条目只影响语速与停顿，
+        # 否则全局情绪条目的参考音频会把该机器人的音色覆盖掉
+        if profile and not profile.emotion_ref_audio:
+            for key in ("ref_audio_path", "prompt_text", "prompt_lang"):
+                params.pop(key, None)
+
+        return params
 
     @filter.on_decorating_result(priority=14)
     async def on_decorating_result(self, event: AstrMessageEvent):
@@ -100,8 +127,11 @@ class GPTSoVITSPlugin(Star):
         if len(combined_text) > cfg.max_msg_len:
             return
 
-        params = await self._get_emotion_params(event, combined_text)
-        res = await self.service.inference(combined_text, extra_params=params)
+        profile = self._resolve_profile(event)
+        params = await self._get_emotion_params(event, combined_text, profile)
+        res = await self.service.inference(
+            combined_text, extra_params=params, profile=profile
+        )
         if not bool(res):
             return
         chain.clear()
@@ -114,7 +144,7 @@ class GPTSoVITSPlugin(Star):
             return
 
         text = event.message_str.partition(" ")[2]
-        res = await self.service.inference(text)
+        res = await self.service.inference(text, profile=self._resolve_profile(event))
 
         if not bool(res):
             yield event.plain_result(res.error)
@@ -129,6 +159,8 @@ class GPTSoVITSPlugin(Star):
             return
         yield event.plain_result("重启TTS中...(报错信息请忽略，等待一会即可完成重启)")
         await self.service.restart()
+        for profile in self.cfg.profiles:
+            await self.service.restart(profile)
 
     @filter.llm_tool()
     async def gsv_tts(self, event: AstrMessageEvent, message: str = ""):
@@ -138,8 +170,11 @@ class GPTSoVITSPlugin(Star):
             message(string): 要讲的话
         """
         try:
-            params = await self._get_emotion_params(event, message)
-            res = await self.service.inference(message, extra_params=params)
+            profile = self._resolve_profile(event)
+            params = await self._get_emotion_params(event, message, profile)
+            res = await self.service.inference(
+                message, extra_params=params, profile=profile
+            )
             if not bool(res):
                 return res.error
             seg = self._to_record(res)

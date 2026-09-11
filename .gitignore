@@ -1,1 +1,12 @@
 __pycache__/
+*.py[cod]
+
+# 本地训练权重与音频素材，体积大，不入库
+settings/
+*.ckpt
+*.pth
+
+# 本地运行产物
+logs/
+*.log
+cache/

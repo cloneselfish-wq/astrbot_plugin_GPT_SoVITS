@@ -33,17 +33,19 @@ class GSVRequestResult:
 class GSVApiClient:
     """
     API 层（HTTP 通信）
+
+    一个实例对应一个 GPT-SoVITS 服务地址，可同时存在多个
     """
 
-    def __init__(self, config: PluginConfig):
-        self.cfg = config.client
-        self.base_url = self.cfg.base_url.rstrip("/")
+    def __init__(self, base_url: str, timeout: int = 60):
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
         self.gpt_url = f"{self.base_url}/set_gpt_weights"
         self.sovits_url = f"{self.base_url}/set_sovits_weights"
         self.control_url = f"{self.base_url}/control"
         self.tts_url = f"{self.base_url}/tts"
 
-        self.session = ClientSession(timeout=ClientTimeout(total=self.cfg.timeout))
+        self.session = ClientSession(timeout=ClientTimeout(total=timeout))
 
     async def close(self):
         if self.session:
@@ -110,3 +112,31 @@ class GSVApiClient:
             self.control_url,
             params={"command": "restart"},
         )
+
+
+class GSVClientPool:
+    """
+    按服务地址复用客户端，一个地址一个连接池
+
+    每个 GPT-SoVITS 实例各自常驻一套音色，切换音色靠切换实例地址完成，
+    因此这里不涉及热切换模型带来的阻塞。
+    """
+
+    def __init__(self, config: PluginConfig):
+        self.cfg = config
+        self.timeout = config.client.timeout
+        self._clients: dict[str, GSVApiClient] = {}
+
+    def get(self, base_url: str | None = None) -> GSVApiClient:
+        url = (base_url or self.cfg.client.base_url).strip().rstrip("/")
+        client = self._clients.get(url)
+        if client is None:
+            client = GSVApiClient(url, timeout=self.timeout)
+            self._clients[url] = client
+            logger.debug(f"[HTTP] 新建客户端: {url}")
+        return client
+
+    async def close(self):
+        for client in self._clients.values():
+            await client.close()
+        self._clients.clear()

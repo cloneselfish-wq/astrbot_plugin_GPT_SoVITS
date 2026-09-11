@@ -64,6 +64,130 @@
             }
         }
     },
+    "bot_voices": {
+        "description": "音色档案（给不同的机器人分配不同音色）",
+        "hint": "按机器人的 QQ 号匹配。命中档案后，会用该档案的实例地址、模型权重和参考音频来合成语音；没有命中的机器人仍走上面的全局配置。注意：一个 GPT-SoVITS 实例同一时间只能常驻一套音色，要给两个机器人配不同音色，需要在本机分别启动两个实例（例如 9880 与 9881）。",
+        "type": "template_list",
+        "templates": {
+            "default": {
+                "name": "音色档案",
+                "items": {
+                    "name": {
+                        "description": "音色名称",
+                        "type": "string",
+                        "hint": "仅用于显示与日志，例如「刻晴」",
+                        "default": ""
+                    },
+                    "self_id": {
+                        "description": "机器人 QQ 号",
+                        "type": "string",
+                        "hint": "该音色对应的机器人账号。多个账号可用英文逗号分隔",
+                        "default": ""
+                    },
+                    "enabled": {
+                        "description": "启用此档案",
+                        "type": "bool",
+                        "hint": "关闭后此机器人回退到全局配置",
+                        "default": true
+                    },
+                    "base_url": {
+                        "description": "该音色的实例地址",
+                        "type": "string",
+                        "hint": "留空则使用全局的客户端地址。不同音色请指向不同的端口",
+                        "default": ""
+                    },
+                    "gpt_path": {
+                        "description": "GPT 模型文件路径(.ckpt)",
+                        "type": "string",
+                        "hint": "必须是运行的 GPT-SoVITS 所在机器上的路径，请用 “/” 分隔。留空则用全局配置",
+                        "default": ""
+                    },
+                    "sovits_path": {
+                        "description": "SoVITS 模型文件路径(.pth)",
+                        "type": "string",
+                        "hint": "必须是运行的 GPT-SoVITS 所在机器上的路径，请用 “/” 分隔。留空则用全局配置",
+                        "default": ""
+                    },
+                    "ref_audio_path": {
+                        "description": "参考音频路径",
+                        "type": "string",
+                        "hint": "决定音色，必须是运行的 GPT-SoVITS 所在机器上的路径。3~10 秒的纯净人声效果最好",
+                        "default": ""
+                    },
+                    "prompt_text": {
+                        "description": "参考音频对应的文本",
+                        "type": "string",
+                        "hint": "需与参考音频内容逐字一致",
+                        "default": ""
+                    },
+                    "prompt_lang": {
+                        "description": "参考音频的语言",
+                        "type": "string",
+                        "hint": "参考音频讲什么语言就填什么。日文参考音频填 ja",
+                        "options": [
+                            "zh",
+                            "en",
+                            "ja",
+                            "ko"
+                        ],
+                        "labels": [
+                            "中文",
+                            "英语",
+                            "日语",
+                            "韩语"
+                        ],
+                        "default": "zh"
+                    },
+                    "text_lang": {
+                        "description": "合成文本的语言",
+                        "type": "string",
+                        "hint": "要合成的内容是什么语言。参考音频是日文也可以合成中文",
+                        "options": [
+                            "zh",
+                            "en",
+                            "ja",
+                            "ko"
+                        ],
+                        "labels": [
+                            "中文",
+                            "英语",
+                            "日语",
+                            "韩语"
+                        ],
+                        "default": "zh"
+                    },
+                    "speed_factor": {
+                        "description": "语速倍数",
+                        "type": "float",
+                        "hint": "1.0 为原速",
+                        "slider": {
+                            "min": 0.5,
+                            "max": 2.0,
+                            "step": 0.1
+                        },
+                        "default": 1
+                    },
+                    "fragment_interval": {
+                        "description": "语音片段间隔（秒）",
+                        "type": "float",
+                        "hint": "间隔越短语气越急促",
+                        "slider": {
+                            "min": 0.1,
+                            "max": 1.0,
+                            "step": 0.01
+                        },
+                        "default": 0.3
+                    },
+                    "emotion_ref_audio": {
+                        "description": "允许情绪条目覆盖参考音频",
+                        "type": "bool",
+                        "hint": "关闭时（推荐），情绪条目只影响语速和停顿，不会改变该机器人的音色；开启后情绪条目自带的参考音频会覆盖本档案的音色",
+                        "default": false
+                    }
+                }
+            }
+        }
+    },
     "model": {
         "description": "模型配置",
         "type": "object",
