@@ -112,6 +112,12 @@ class JudgeConfig(ConfigNode):
     provider_id: str
 
 
+class TranslateConfig(ConfigNode):
+    """语音翻译配置：把回复翻译成音色要求的语言后再送去合成"""
+
+    provider_id: str
+
+
 class VoiceProfile(ConfigNode):
     """音色档案：按机器人（self_id）绑定一整套音色参数"""
 
@@ -128,12 +134,23 @@ class VoiceProfile(ConfigNode):
     speed_factor: float
     fragment_interval: float
     emotion_ref_audio: bool
+    auto_translate: bool
+    translate_style: str
 
     def __init__(self, data: dict[str, Any]):
         super().__init__(data)
         self.gpt_path = PluginConfig.normalize_path(self.gpt_path or "")
         self.sovits_path = PluginConfig.normalize_path(self.sovits_path or "")
         self.ref_audio_path = PluginConfig.normalize_path(self.ref_audio_path or "")
+
+    @property
+    def translate_target(self) -> str:
+        """需要翻译时，译文的目标语言（即 text_lang）；未开启或非法时为空串"""
+
+        if not self.auto_translate:
+            return ""
+        target = str(self.text_lang or "").strip().lower()
+        return target if target in ("zh", "en", "ja", "ko") else ""
 
     @property
     def ids(self) -> set[str]:
@@ -180,6 +197,7 @@ class PluginConfig(ConfigNode):
     model: ModelConfig
     default_params: dict[str, Any]
     judge: JudgeConfig
+    translate: TranslateConfig
     cache: CacheConfig
     entry_storage: list[dict[str, Any]]
     bot_voices: list[dict[str, Any]]
@@ -273,6 +291,30 @@ class PluginConfig(ConfigNode):
         provider = self.context.get_provider_by_id(
             self.judge.provider_id
         ) or self.context.get_using_provider(umo)
+
+        if not isinstance(provider, Provider):
+            raise RuntimeError("未找到可用的 LLM Provider")
+
+        return provider
+
+    def get_translate_provider(self, umo: str | None = None) -> Provider:
+        """翻译用的 LLM
+
+        优先用 `translate.provider_id`，没填则沿用情感判断的 provider，
+        再没填就用当前默认 provider（翻译是简单任务，建议指定一个快速稳定的小模型）。
+        """
+
+        provider_id = ""
+        for section in ("translate", "judge"):
+            raw = self._data.get(section)
+            if isinstance(raw, Mapping):
+                provider_id = str(raw.get("provider_id") or "").strip()
+            if provider_id:
+                break
+
+        provider = self.context.get_provider_by_id(provider_id)
+        if not isinstance(provider, Provider):
+            provider = self.context.get_using_provider(umo)
 
         if not isinstance(provider, Provider):
             raise RuntimeError("未找到可用的 LLM Provider")

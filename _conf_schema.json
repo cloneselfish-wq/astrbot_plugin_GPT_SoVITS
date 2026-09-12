@@ -189,6 +189,18 @@
                         "type": "bool",
                         "hint": "关闭时（推荐），情绪条目只影响语速和停顿，不会改变该机器人的音色；开启后情绪条目自带的参考音频会覆盖本档案的音色",
                         "default": false
+                    },
+                    "auto_translate": {
+                        "description": "合成前翻译成「合成文本的语言」",
+                        "type": "bool",
+                        "hint": "开启后，若机器人回复的语言与上面的「合成文本的语言」不一致，先用 LLM 翻译过去再合成语音（只为母语音色服务，文字回复仍是原文）。例如日文音色：合成文本的语言选「日语」并打开本项",
+                        "default": false
+                    },
+                    "translate_style": {
+                        "description": "翻译口吻提示（可选）",
+                        "type": "string",
+                        "hint": "追加给翻译模型的人设，例如「活泼的年轻女性口语」。留空使用通用设定",
+                        "default": ""
                     }
                 }
             }
@@ -435,6 +447,20 @@
                 "type": "string",
                 "default": "",
                 "hint": "留空或者填写的提供商不存在时, 则使用当前正在使用的LLM提供商。 tip:工作较为简单，建议用稳定便宜又快速的小模型",
+                "_special": "select_provider"
+            }
+        }
+    },
+    "translate": {
+        "description": "语音翻译配置",
+        "hint": "当某个音色档案开启了「合成前翻译」时生效：机器人回复会先被 LLM 翻译成该档案「合成文本的语言」再送去合成，文字回复本身不受影响。翻译会增加一次 LLM 调用的耗时，建议指定一个稳定快速的小模型。",
+        "type": "object",
+        "items": {
+            "provider_id": {
+                "description": "翻译用的LLM提供商",
+                "type": "string",
+                "default": "",
+                "hint": "留空则沿用「LLM 配置」里的提供商，再留空则使用当前默认提供商",
                 "_special": "select_provider"
             }
         }

@@ -14,6 +14,7 @@ from .core.emotion import EmotionJudger
 from .core.entry import EntryManager
 from .core.local_data import LocalDataManager
 from .core.service import GPTSoVITSService
+from .core.translate import VoiceTranslator, detect_lang
 
 
 class GPTSoVITSPlugin(Star):
@@ -24,6 +25,7 @@ class GPTSoVITSPlugin(Star):
         self.entry_mgr = EntryManager(self.cfg)
         self.pool = GSVClientPool(self.cfg)
         self.judger = EmotionJudger(self.cfg)
+        self.translator = VoiceTranslator(self.cfg)
         self.service = GPTSoVITSService(self.cfg, self.pool, self.local_data)
 
     async def initialize(self):
@@ -92,6 +94,43 @@ class GPTSoVITSPlugin(Star):
 
         return params
 
+    async def _prepare_speech_text(
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        profile: VoiceProfile | None,
+    ) -> tuple[str, str | None]:
+        """按音色档案决定送去合成的文本
+
+        档案开启「合成前翻译」时，先把文本翻成该档案 `text_lang` 指定的语言，
+        这样日语音色就能用母语发音（中文回复仍原样保留）。
+
+        :return: (合成用文本, 需要覆盖的 text_lang)，不需要覆盖时第二项为 None
+        """
+
+        if not text or profile is None:
+            return text, None
+
+        target = profile.translate_target
+        if not target:
+            return text, None
+
+        source = detect_lang(text)
+        # 语言无法判断（纯符号 / emoji / 数字）或已经是对应语言，直接合成
+        if not source or source == target:
+            return text, None
+
+        translated = await self.translator.translate(event, text, target, profile)
+        if not translated or translated == text:
+            logger.warning(
+                f"[{profile.name}] 翻译为 {target} 失败，本次改用原文（{source}）合成"
+            )
+            # 回退时把 text_lang 也改回原文语言，否则口音会很怪
+            return text, source
+
+        logger.info(f"[{profile.name}] 语音文本已翻译 {source} -> {target}: {translated}")
+        return translated, target
+
     @filter.on_decorating_result(priority=14)
     async def on_decorating_result(self, event: AstrMessageEvent):
         """发送前钩子：把机器人即将发出的文本回复转成语音
@@ -145,12 +184,19 @@ class GPTSoVITSPlugin(Star):
                 continue
 
             try:
+                speech_text, lang_override = await self._prepare_speech_text(
+                    event, seg.text, profile
+                )
+                seg_params = dict(params) if params else {}
+                if lang_override:
+                    seg_params["text_lang"] = lang_override
+
                 logger.info(
                     f"[{profile.name if profile else '默认音色'}] "
-                    f"将回复转为语音（{len(seg.text)} 字）"
+                    f"将回复转为语音（{len(speech_text)} 字）"
                 )
                 res = await self.service.inference(
-                    seg.text, extra_params=params, profile=profile
+                    speech_text, extra_params=seg_params, profile=profile
                 )
                 if not bool(res):
                     logger.error(f"语音合成失败，改为发送原文: {res.error}")
@@ -176,7 +222,14 @@ class GPTSoVITSPlugin(Star):
             return
 
         text = event.message_str.partition(" ")[2]
-        res = await self.service.inference(text, profile=self._resolve_profile(event))
+        profile = self._resolve_profile(event)
+        speech_text, lang_override = await self._prepare_speech_text(
+            event, text, profile
+        )
+        params = {"text_lang": lang_override} if lang_override else None
+        res = await self.service.inference(
+            speech_text, extra_params=params, profile=profile
+        )
 
         if not bool(res):
             yield event.plain_result(res.error)
@@ -203,9 +256,15 @@ class GPTSoVITSPlugin(Star):
         """
         try:
             profile = self._resolve_profile(event)
+            speech_text, lang_override = await self._prepare_speech_text(
+                event, message, profile
+            )
             params = await self._get_emotion_params(event, message, profile)
+            if lang_override:
+                params = dict(params or {})
+                params["text_lang"] = lang_override
             res = await self.service.inference(
-                message, extra_params=params, profile=profile
+                speech_text, extra_params=params, profile=profile
             )
             if not bool(res):
                 return res.error
