@@ -110,6 +110,9 @@ class GPTSoVITSService:
             cache_path = self.local_data.save_audio(result.data, params)
             if cache_path:
                 result.file_path = str(cache_path)
+        elif result.unreachable:
+            # 服务没启动 / 隧道断了：上层会静默退回文字，这里不必刷 error 级日志
+            logger.warning(f"TTS 服务不可达，跳过合成: {result.error}")
         else:
             logger.error(f"TTS 推理失败: {result.error}")
 

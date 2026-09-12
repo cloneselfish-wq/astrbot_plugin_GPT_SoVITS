@@ -95,6 +95,7 @@ class AutoConfig(ConfigNode):
     tts_prob: float
     max_msg_len: int
     dual_output: bool
+    only_configured_bots: bool
 
 
 class ClientConfig(ConfigNode):

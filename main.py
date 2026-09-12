@@ -48,6 +48,36 @@ class GPTSoVITSPlugin(Star):
     def _resolve_profile(self, event: AstrMessageEvent) -> VoiceProfile | None:
         return self.cfg.match_profile(self._self_id(event))
 
+    def _voice_allowed(self, profile: VoiceProfile | None) -> bool:
+        """该机器人是否允许发语音
+
+        没命中音色档案时默认回退到全局配置（旧行为）。打开
+        `auto.only_configured_bots` 后改为直接放弃——否则没配音色的机器人会借用
+        全局配置里的音色开口，听起来像是替别的角色说话。
+
+        例外：一条档案都没配置时仍回退全局，否则整个插件都不会出声。
+        """
+
+        if profile is not None:
+            return True
+        if not self.cfg.auto.only_configured_bots:
+            return True
+        if not self.cfg.profiles:
+            logger.warning(
+                "已开启「只给配置了音色的机器人转语音」，但没有任何音色档案，本次回退全局配置"
+            )
+            return True
+        return False
+
+    @staticmethod
+    def _speech_error(res: GSVRequestResult, prefix: str = "已放弃转语音") -> str:
+        if res.unreachable:
+            return (
+                f"本机 GPT-SoVITS 服务未启动或不可达，{prefix}。"
+                "请检查本机实例与隧道是否正常。"
+            )
+        return f"语音合成失败，{prefix}：{res.error}"
+
     @staticmethod
     def _to_record(res: GSVRequestResult, text: str | None = None) -> Record:
         if res.file_path:
@@ -141,6 +171,11 @@ class GPTSoVITSPlugin(Star):
         if not self.cfg.enabled:
             return
 
+        # 本轮已经由 gsv_tts 工具发过语音了，别再转一次（否则同一条回复会发两段语音）
+        if event.get_extra("gsv_tts_sent"):
+            logger.debug("本轮已通过 gsv_tts 工具发送语音，跳过自动转语音")
+            return
+
         cfg = self.cfg.auto
         result = event.get_result()
         if not result or not result.chain:
@@ -174,6 +209,12 @@ class GPTSoVITSPlugin(Star):
             return
 
         profile = self._resolve_profile(event)
+        if not self._voice_allowed(profile):
+            logger.info(
+                f"机器人 {self._self_id(event)} 未配置音色档案，本次直接发送文字"
+            )
+            return
+
         params = await self._get_emotion_params(event, combined_text, profile)
 
         new_chain = []
@@ -199,7 +240,10 @@ class GPTSoVITSPlugin(Star):
                     speech_text, extra_params=seg_params, profile=profile
                 )
                 if not bool(res):
-                    logger.error(f"语音合成失败，改为发送原文: {res.error}")
+                    if res.unreachable:
+                        logger.warning(f"语音服务不可用，本条改为发送文字：{res.error}")
+                    else:
+                        logger.error(f"语音合成失败，改为发送原文: {res.error}")
                     new_chain.append(seg)
                     continue
                 new_chain.append(self._to_record(res, text=seg.text))
@@ -223,6 +267,10 @@ class GPTSoVITSPlugin(Star):
 
         text = event.message_str.partition(" ")[2]
         profile = self._resolve_profile(event)
+        if not self._voice_allowed(profile):
+            yield event.plain_result("当前机器人未配置音色档案，无法使用语音。")
+            return
+
         speech_text, lang_override = await self._prepare_speech_text(
             event, text, profile
         )
@@ -232,7 +280,7 @@ class GPTSoVITSPlugin(Star):
         )
 
         if not bool(res):
-            yield event.plain_result(res.error)
+            yield event.plain_result(self._speech_error(res))
             return
 
         yield event.chain_result([self._to_record(res)])
@@ -249,26 +297,57 @@ class GPTSoVITSPlugin(Star):
 
     @filter.llm_tool()
     async def gsv_tts(self, event: AstrMessageEvent, message: str = ""):
-        """
-        用语音输出要讲的话
+        """把你要说的话用真人语音发出去，而不是发文字。
+
+        以下情况应当调用本工具：
+        - 用户明确想「听」你说话：说「用语音说」「语音回复我」「念一下」「唱一句」「说给我听」等；
+        - 用户要求你发出某种声音 / 语气 / 情绪，而这些靠文字表达不出来；
+        - 你自己觉得这句话用声音说出来效果更好（例如道别、撒娇、唱歌、念剧中的台词）。
+        普通聊天、回答问题、需要贴链接或代码时不要调用，直接用文字回复即可。
+        调用成功后不要在文字里重复同一句话，简短附和一下就好（也不要再发一遍语音）。
+
         Args:
-            message(string): 要讲的话
+            message(string): 要用语音说出的内容。必须是可直接朗读的口语短句，100 字以内，不要带 Markdown、链接或括号内的旁白说明。
         """
         try:
             profile = self._resolve_profile(event)
+            if not self._voice_allowed(profile):
+                return "当前机器人没有配置音色，无法发语音，请直接用文字回复。"
+
+            text = str(message or "").strip()
+            if not text:
+                return "没有提供要朗读的内容，请把要说的话填进 message 参数。"
+
+            limit = self.cfg.auto.max_msg_len
+            if limit and len(text) > limit:
+                return (
+                    f"内容过长（{len(text)} 字，上限 {limit} 字），"
+                    "请精简后再调用，或直接用文字回复。"
+                )
+
+            # 情绪匹配用原文（可能是中文），送合成的是翻译后的文本
             speech_text, lang_override = await self._prepare_speech_text(
-                event, message, profile
+                event, text, profile
             )
-            params = await self._get_emotion_params(event, message, profile)
+            params = await self._get_emotion_params(event, text, profile)
             if lang_override:
                 params = dict(params or {})
                 params["text_lang"] = lang_override
+
             res = await self.service.inference(
                 speech_text, extra_params=params, profile=profile
             )
             if not bool(res):
-                return res.error
-            seg = self._to_record(res)
+                return (
+                    "语音合成失败，请改用文字把内容回复给用户，不要重复调用本工具。"
+                    f"（原因：{res.error}）"
+                )
+
+            seg = self._to_record(res, text=text)
             await event.send(event.chain_result([seg]))
+            # 标记一下，避免发送前钩子再把文字回复转成第二段语音
+            event.set_extra("gsv_tts_sent", True)
+            return "语音已发送，不必再用文字重复同一句话。"
         except Exception as e:
-            return str(e)
+            logger.exception("gsv_tts 工具执行异常")
+            return f"语音合成异常，请改用文字回复。（{e}）"
