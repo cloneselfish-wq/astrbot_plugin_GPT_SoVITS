@@ -1,5 +1,13 @@
 # 更新日志
 
+## v3.6.3
+
+### 变更
+
+- `_aiocqhttp_self_id()` 改为**优先取 `message_obj.self_id`**（与 AstrBot 自身在
+  `aiocqhttp_message_event` 里的写法一致），`raw_message["self_id"]` 仅作兜底。
+  两处都没有时返回 `None`，即不向 OneBot 传 `self_id` 路由参数。
+
 ## v3.6.2
 
 ### 修复

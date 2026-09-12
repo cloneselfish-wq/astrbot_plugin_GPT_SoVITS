@@ -147,7 +147,18 @@ class GPTSoVITSPlugin(Star):
 
     @staticmethod
     def _aiocqhttp_self_id(event: AstrMessageEvent):
-        """取底层 aiocqhttp 事件里的 self_id（AstrBot 用它路由到具体账号）"""
+        """取底层 aiocqhttp 事件的 self_id（AstrBot 用它路由到具体账号）
+
+        与 AstrBot 自己的写法保持一致（aiocqhttp_message_event 用
+        `getattr(message_obj, "self_id", None)`），raw_message 作为兜底。
+        """
+
+        try:
+            sid = getattr(getattr(event, "message_obj", None), "self_id", None)
+            if sid:
+                return sid
+        except Exception:
+            pass
 
         raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
         if raw is None or not hasattr(raw, "get"):
