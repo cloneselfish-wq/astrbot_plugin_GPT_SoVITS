@@ -268,6 +268,34 @@ class GPTSoVITSPlugin(Star):
 
         return detect_lang(text) == "zh"
 
+    def _keep_text_after_speech(
+        self, text: str, lang_override: str, profile: VoiceProfile | None
+    ) -> bool:
+        """语音后面还要不要再跟一份文字
+
+        两条链路（发送前钩子、gsv_tts 工具）共用这一份判断，避免只有其中一条
+        附了中文原文、另一条漏掉。
+
+        - 开了「双输出」：任何语音都跟一份文字；
+        - 否则只有外语语音才跟，且跟的是送合成前的中文原文。
+        """
+
+        cfg = self.cfg.auto
+        if cfg.dual_output:
+            return True
+
+        if cfg.zh_text_on_foreign_voice and self._needs_zh_fallback(
+            text, lang_override, profile
+        ):
+            name = profile.name if profile else "默认音色"
+            logger.info(
+                f"[{name}] 语音语言非中文"
+                f"（{self._synth_lang(lang_override, profile)}），已附上中文原文"
+            )
+            return True
+
+        return False
+
     @filter.on_decorating_result(priority=14)
     async def on_decorating_result(self, event: AstrMessageEvent):
         """发送前钩子：把机器人即将发出的文本回复转成语音
@@ -377,15 +405,8 @@ class GPTSoVITSPlugin(Star):
                 new_chain.append(seg)
                 continue
 
-            # 双输出：语音之外再保留一份文字
-            if cfg.dual_output:
-                new_chain.append(seg)
-            elif cfg.zh_text_on_foreign_voice and self._needs_zh_fallback(
-                seg.text, lang_override, profile
-            ):
-                # 外语语音群友听不懂，把中文原文接在语音后面
-                name = profile.name if profile else "默认音色"
-                logger.info(f"[{name}] 语音语言非中文（{self._synth_lang(lang_override, profile)}），已附上中文原文")
+            # 语音之外还要不要再跟一份文字（双输出 / 外语附中文原文）
+            if self._keep_text_after_speech(seg.text, lang_override, profile):
                 new_chain.append(seg)
 
         if new_chain:
@@ -530,9 +551,16 @@ class GPTSoVITSPlugin(Star):
                 )
 
             seg = self._to_record(res, text=text)
-            await event.send(event.chain_result([seg]))
+            chain = [seg]
+            # 外语语音群友听不懂，把送合成前的原文接在语音后面
+            # （与发送前钩子同一条判断，别让两条链路行为不一致）
+            if self._keep_text_after_speech(text, lang_override, profile):
+                chain.append(Plain(text))
+            await event.send(event.chain_result(chain))
             # 标记一下，避免发送前钩子再把文字回复转成第二段语音
             event.set_extra("gsv_tts_sent", True)
+            if len(chain) > 1:
+                return "语音已发送（语音后已附上文字原文），不必再用文字重复同一句话。"
             return "语音已发送，不必再用文字重复同一句话。"
         except Exception as e:
             logger.exception("gsv_tts 工具执行异常")
