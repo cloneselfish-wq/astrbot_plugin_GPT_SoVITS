@@ -163,6 +163,7 @@ class VoiceProfile(ConfigNode):
     self_id: str
     enabled: bool
     base_url: str
+    voice: str
     gpt_path: str
     sovits_path: str
     ref_audio_path: str
@@ -207,6 +208,11 @@ class VoiceProfile(ConfigNode):
         """只返回填写了的项，空值不覆盖默认参数"""
 
         params: dict[str, Any] = {}
+        # 多音色实例（一个 GSV 进程常驻多套音色）靠这个字段选音色槽；
+        # 留空表示不指定，由服务端用它自己的默认音色。
+        voice = str(self.voice or "").strip()
+        if voice:
+            params["voice"] = voice
         if self.ref_audio_path:
             params["ref_audio_path"] = self.ref_audio_path
         if self.prompt_text:

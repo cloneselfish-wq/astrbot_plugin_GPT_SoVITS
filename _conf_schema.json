@@ -117,7 +117,13 @@
                     "base_url": {
                         "description": "该音色的实例地址",
                         "type": "string",
-                        "hint": "留空则使用全局的客户端地址。不同音色请指向不同的端口",
+                        "hint": "留空则使用全局的客户端地址。多音色模式下各档案都填同一个地址即可",
+                        "default": ""
+                    },
+                    "voice": {
+                        "description": "音色槽名称",
+                        "type": "string",
+                        "hint": "只有多音色实例（一个进程常驻多套音色）才需要填：填该音色在服务里的 id，如 keqing / saaya / unicorn。留空则由服务端决定用哪个",
                         "default": ""
                     },
                     "gpt_path": {
