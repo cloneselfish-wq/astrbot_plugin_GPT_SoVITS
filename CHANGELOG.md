@@ -1,5 +1,24 @@
 # 更新日志
 
+## v3.6.4
+
+### 新增
+
+- 配置项 `model.manage_weights`（默认 `true`）：是否由插件在启动时把权重推给 GSV 实例。
+  设为 `false` 时，插件加载/重载不再调用 `/set_gpt_weights`、`/set_sovits_weights`，
+  各实例按自身 `-c` 指定的 yaml 加载权重。
+
+### 说明
+
+- 触发这次改动的现网现象：3 个实例（刻晴/沙绫/独角兽）常驻时，插件每次加载都会对
+  「默认音色 + 3 个档案」合计发出 4 次 GPT + 4 次 SoVITS 权重设置。而 GSV 的
+  `/set_*_weights` 是「先加载新模型、再释放旧模型」，瞬间同时持有新旧两份权重，
+  提交内存与显存瞬时翻倍。本机提交内存上限 56.72GB、历史峰值已顶满，于是那一次
+  重载直接把沙绫实例打成 `fatal : Memory allocation failure` → `CUDA error: unknown error`，
+  实例 HTTP 还活着但每次合成必失败（只有真发一次 /tts 才能发现）。
+- 一实例一音色、实例由外部脚本按 yaml 启动的部署，把 `model.manage_weights` 设为
+  `false` 即可去掉这个瞬时峰值；插件仍能正常发声（权重本来就已就位）。
+
 ## v3.6.3
 
 ### 变更

@@ -114,6 +114,15 @@ class ClientConfig(ConfigNode):
 class ModelConfig(ConfigNode):
     gpt_path: str
     sovits_path: str
+    manage_weights: bool
+
+    def __init__(self, data: MutableMapping[str, Any]):
+        if isinstance(data, MutableMapping):
+            # 实例按自身 -c yaml 启动时权重已就位，再推一次属于重复加载：
+            # 每次 /set_*_weights 都是「先加载新模型再释放旧模型」，
+            # 瞬时显存与提交内存翻倍，多实例共存时容易把机器顶爆。
+            data.setdefault("manage_weights", True)
+        super().__init__(data)
 
 
 class JudgeConfig(ConfigNode):

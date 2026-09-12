@@ -43,6 +43,14 @@ class GPTSoVITSService:
     async def load_model(self):
         """加载默认音色，以及各音色档案对应的实例模型"""
 
+        if not self.cfg.model.manage_weights:
+            logger.info(
+                "[权重] 已跳过启动时的权重设置（model.manage_weights=false）："
+                "各实例按自身 -c 配置加载权重。适合「一实例一音色、实例由外部脚本按 yaml 启动」"
+                "的部署，可避免启动/重载瞬间同时持有新旧两份模型。"
+            )
+            return
+
         await self._load_one(
             self.pool.get(None),
             self.cfg.model.gpt_path,
