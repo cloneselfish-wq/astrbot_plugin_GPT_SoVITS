@@ -5,7 +5,7 @@ from astrbot.api import logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import Plain, Record
+from astrbot.core.message.components import Plain, Record, Reply
 from astrbot.core.platform import AstrMessageEvent
 
 from .core.client import GSVClientPool, GSVRequestResult
@@ -144,6 +144,74 @@ class GPTSoVITSPlugin(Star):
                 "请检查本机实例与隧道是否正常。"
             )
         return f"语音合成失败，{prefix}：{res.error}"
+
+    @staticmethod
+    def _aiocqhttp_self_id(event: AstrMessageEvent):
+        """取底层 aiocqhttp 事件里的 self_id（AstrBot 用它路由到具体账号）"""
+
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if raw is None or not hasattr(raw, "get"):
+            return None
+        try:
+            return raw.get("self_id")
+        except Exception:
+            return None
+
+    async def _send_voice_direct(
+        self, event: AstrMessageEvent, seg: Record
+    ) -> str | None:
+        """绕开 AstrBot 的发送入口，单独把语音发出去并拿回它的 message_id
+
+        为什么要绕：`AiocqhttpMessageEvent._dispatch_send` 把 `send_group_msg`
+        的返回值丢掉了，而「引用自己刚发的这条语音」必须有 message_id，
+        所以这里直接调底层 OneBot 接口。
+
+        :return: 消息 id；非 aiocqhttp 平台或发送失败时返回 None（调用方回退）
+        """
+
+        bot = getattr(event, "bot", None)
+        if bot is None or not hasattr(bot, "call_action"):
+            return None
+        try:
+            if event.get_platform_name() != "aiocqhttp":
+                return None
+        except Exception:
+            return None
+
+        try:
+            bs64 = await seg.convert_to_base64()
+        except Exception as e:
+            logger.warning(f"语音转 base64 失败，改用常规方式发送：{e}")
+            return None
+
+        routing = {}
+        self_id = self._aiocqhttp_self_id(event)
+        if self_id:
+            routing["self_id"] = self_id
+
+        payload = [{"type": "record", "data": {"file": f"base64://{bs64}"}}]
+        try:
+            group_id = event.get_group_id()
+            if group_id:
+                resp = await bot.call_action(
+                    "send_group_msg", group_id=int(group_id), message=payload, **routing
+                )
+            else:
+                resp = await bot.call_action(
+                    "send_private_msg",
+                    user_id=int(event.get_sender_id()),
+                    message=payload,
+                    **routing,
+                )
+        except Exception as e:
+            logger.warning(f"单独发送语音失败，改用常规方式发送：{e}")
+            return None
+
+        mid = resp.get("message_id") if isinstance(resp, dict) else None
+        if not mid:
+            logger.warning("语音已发出但没拿到 message_id，无法引用它附上原文")
+            return None
+        return str(mid)
 
     @staticmethod
     def _to_record(res: GSVRequestResult, text: str | None = None) -> Record:
@@ -399,15 +467,28 @@ class GPTSoVITSPlugin(Star):
                         logger.error(f"语音合成失败，改为发送原文: {res.error}")
                     new_chain.append(seg)
                     continue
-                new_chain.append(self._to_record(res, text=seg.text))
+                rec = self._to_record(res, text=seg.text)
             except Exception as e:
                 logger.error(f"语音合成异常，改为发送原文: {e}")
                 new_chain.append(seg)
                 continue
 
-            # 语音之外还要不要再跟一份文字（双输出 / 外语附中文原文）
+            # 语音之外还要不要再跟一份文字（双输出 / 外语附中文原文）。
+            # 跟的方式是把语音单独发出去、再发一条引用它的消息带原文：
+            # QQ 对「语音 + 文字」混排只渲染语音，文字会被丢掉（实测）。
             if self._keep_text_after_speech(seg.text, lang_override, profile):
+                mid = await self._send_voice_direct(event, rec)
+                if mid:
+                    # 语音已经单独发出去了，这里只发「引用它 + 原文」
+                    new_chain.append(Reply(id=mid))
+                    new_chain.append(seg)
+                    continue
+                # 拿不到 message_id（平台不支持 / 发送失败）→ 退回同一条消息混排
+                new_chain.append(rec)
                 new_chain.append(seg)
+                continue
+
+            new_chain.append(rec)
 
         if new_chain:
             result.chain = new_chain
@@ -551,16 +632,30 @@ class GPTSoVITSPlugin(Star):
                 )
 
             seg = self._to_record(res, text=text)
-            chain = [seg]
-            # 外语语音群友听不懂，把送合成前的原文接在语音后面
-            # （与发送前钩子同一条判断，别让两条链路行为不一致）
+            # 外语语音群友听不懂，把送合成前的原文附上。附的方式是「引用这条
+            # 语音单独发一条」——QQ 对「语音 + 文字」混排只渲染语音，文字会被
+            # 丢掉（实测 NapCat 侧收到了 text 段、群里却看不到）。
+            # 判断与发送前钩子共用，别让两条链路行为不一致。
             if self._keep_text_after_speech(text, lang_override, profile):
-                chain.append(Plain(text))
-            await event.send(event.chain_result(chain))
+                mid = await self._send_voice_direct(event, seg)
+                if mid:
+                    await event.send(
+                        event.chain_result([Reply(id=mid), Plain(text)])
+                    )
+                    # 标记一下，避免发送前钩子再把文字回复转成第二段语音
+                    event.set_extra("gsv_tts_sent", True)
+                    return (
+                        "语音已发送（已引用该语音附上文字原文），"
+                        "不必再用文字重复同一句话。"
+                    )
+                # 拿不到 message_id（平台不支持 / 发送失败）→ 退回同一条消息混排
+                await event.send(event.chain_result([seg, Plain(text)]))
+                event.set_extra("gsv_tts_sent", True)
+                return "语音已发送（语音后已附上文字原文），不必再用文字重复同一句话。"
+
+            await event.send(event.chain_result([seg]))
             # 标记一下，避免发送前钩子再把文字回复转成第二段语音
             event.set_extra("gsv_tts_sent", True)
-            if len(chain) > 1:
-                return "语音已发送（语音后已附上文字原文），不必再用文字重复同一句话。"
             return "语音已发送，不必再用文字重复同一句话。"
         except Exception as e:
             logger.exception("gsv_tts 工具执行异常")
