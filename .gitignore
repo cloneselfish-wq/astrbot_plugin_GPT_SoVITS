@@ -1,10 +1,35 @@
 __pycache__/
 *.py[cod]
 
-# 本地训练权重与音频素材，体积大，不入库
+# 本地训练权重与模型文件，体积大，不入库
 settings/
 *.ckpt
 *.pth
+*.pt
+*.onnx
+*.safetensors
+*.index
+
+# 语音资源：训练音频、切片产物、ASR 标注、试听样本、导出音频，一律不入库
+# 例外：插件自带的默认参考音频 default_audio/（上游功能资源，必须保留）
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.aac
+*.ogg
+*.opus
+*.wem
+*.pck
+!default_audio/*.wav
+
+# 数据集与特征文件
+*.list
+*.tsv
+datasets/
+samples/
+voices/
+outputs/
 
 # 本地运行产物
 logs/
