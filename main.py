@@ -16,6 +16,7 @@ from .core.langswitch import LANG_ALIASES, LANG_CODES, LanguageGate, parse_lang_
 from .core.local_data import LocalDataManager
 from .core.service import GPTSoVITSService
 from .core.translate import LANG_NAMES, VoiceTranslator, detect_lang
+from .core.voicerequest import parse_voice_request
 
 # 「语音语言 默认」可以接受的写法
 _RESET_WORDS = {"默认", "恢復", "恢复", "原样", "原樣", "auto", "reset", "-"}
@@ -233,6 +234,40 @@ class GPTSoVITSPlugin(Star):
         logger.info(f"[{profile.name}] 语音文本已翻译 {source} -> {target}: {translated}")
         return translated, target
 
+    def _synth_lang(self, lang_override: str, profile: VoiceProfile | None) -> str:
+        """本次合成实际用的语言：本次覆盖 > 音色档案默认 > 全局默认"""
+
+        lang = str(lang_override or "").strip().lower()
+        if lang:
+            return lang
+        if profile is not None:
+            return str(profile.text_lang or "").strip().lower()
+        return str((self.cfg.default_params or {}).get("text_lang") or "").strip().lower()
+
+    def _needs_zh_fallback(
+        self,
+        text: str,
+        lang_override: str,
+        profile: VoiceProfile | None,
+    ) -> bool:
+        """这段语音是不是「用外语念中文内容」
+
+        群友大多听不懂日语，外语音色说出来的语音对他们等于没信息，
+        所以要把送合成前的那份原文（`text`）跟在语音后面。
+
+        两个条件都满足才附：语音语言不是中文，**且原文本身是中文**。
+        后者是为了避免「人格本来就回了日语」时又附一遍日语原文。
+        """
+
+        if not text or not text.strip():
+            return False
+
+        lang = self._synth_lang(lang_override, profile)
+        if not lang or lang.startswith("zh"):
+            return False
+
+        return detect_lang(text) == "zh"
+
     @filter.on_decorating_result(priority=14)
     async def on_decorating_result(self, event: AstrMessageEvent):
         """发送前钩子：把机器人即将发出的文本回复转成语音
@@ -251,15 +286,29 @@ class GPTSoVITSPlugin(Star):
         cfg = self.cfg.auto
         result = event.get_result()
         if not result or not result.chain:
+            logger.debug("本次没有待发送的结果，跳过自动转语音")
             return
 
         # 只处理 LLM 产生的结果（机器人的对话回复）
         if cfg.only_llm_result and not result.is_llm_result():
+            logger.debug("本次结果不是 LLM 回复，跳过自动转语音")
             return
 
+        # 群友点名要语音时绕过概率：低概率抽签只负责「平时偶尔来一句」，
+        # 「点名叫她说」必须有确定性通道，否则会出现「明明点名了却不吭声」。
+        requested = (
+            parse_voice_request(getattr(event, "message_str", "") or "")
+            if cfg.voice_on_request
+            else ""
+        )
+
         # 按概率决定是否转语音，tts_prob=1.0 表示每条都转
-        if random.random() > cfg.tts_prob:
+        if not requested and random.random() > cfg.tts_prob:
+            logger.debug(f"未命中自动转语音概率（tts_prob={cfg.tts_prob}），本次发文字")
             return
+
+        if requested:
+            logger.info(f"群友要求语音（命中「{requested}」），本次跳过概率直接转语音")
 
         # 参与合成的文本片段（纯空白片段不参与）
         texts = [
@@ -268,6 +317,7 @@ class GPTSoVITSPlugin(Star):
             if isinstance(seg, Plain) and seg.text and seg.text.strip()
         ]
         if not texts:
+            logger.debug("本次回复没有可朗读的文本片段，跳过自动转语音")
             return
 
         combined_text = "\n".join(texts)
@@ -329,6 +379,13 @@ class GPTSoVITSPlugin(Star):
 
             # 双输出：语音之外再保留一份文字
             if cfg.dual_output:
+                new_chain.append(seg)
+            elif cfg.zh_text_on_foreign_voice and self._needs_zh_fallback(
+                seg.text, lang_override, profile
+            ):
+                # 外语语音群友听不懂，把中文原文接在语音后面
+                name = profile.name if profile else "默认音色"
+                logger.info(f"[{name}] 语音语言非中文（{self._synth_lang(lang_override, profile)}），已附上中文原文")
                 new_chain.append(seg)
 
         if new_chain:

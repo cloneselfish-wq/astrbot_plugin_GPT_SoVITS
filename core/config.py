@@ -96,6 +96,14 @@ class AutoConfig(ConfigNode):
     max_msg_len: int
     dual_output: bool
     only_configured_bots: bool
+    voice_on_request: bool
+    zh_text_on_foreign_voice: bool
+
+    def __init__(self, data: MutableMapping[str, Any]):
+        if isinstance(data, MutableMapping):
+            data.setdefault("voice_on_request", True)
+            data.setdefault("zh_text_on_foreign_voice", True)
+        super().__init__(data)
 
 
 class ClientConfig(ConfigNode):
