@@ -12,9 +12,13 @@ from .core.client import GSVClientPool, GSVRequestResult
 from .core.config import PluginConfig, VoiceProfile
 from .core.emotion import EmotionJudger
 from .core.entry import EntryManager
+from .core.langswitch import LANG_ALIASES, LANG_CODES, LanguageGate, parse_lang_request
 from .core.local_data import LocalDataManager
 from .core.service import GPTSoVITSService
-from .core.translate import VoiceTranslator, detect_lang
+from .core.translate import LANG_NAMES, VoiceTranslator, detect_lang
+
+# 「语音语言 默认」可以接受的写法
+_RESET_WORDS = {"默认", "恢復", "恢复", "原样", "原樣", "auto", "reset", "-"}
 
 
 class GPTSoVITSPlugin(Star):
@@ -27,6 +31,8 @@ class GPTSoVITSPlugin(Star):
         self.judger = EmotionJudger(self.cfg)
         self.translator = VoiceTranslator(self.cfg)
         self.service = GPTSoVITSService(self.cfg, self.pool, self.local_data)
+        # 群友点名换语音语言后，按会话记住一小段时间
+        self.lang_gate = LanguageGate(self.cfg.translate.switch_ttl_seconds)
 
     async def initialize(self):
         if self.cfg.enabled:
@@ -68,6 +74,66 @@ class GPTSoVITSPlugin(Star):
             )
             return True
         return False
+
+    @staticmethod
+    def _session_key(event: AstrMessageEvent, self_id: str) -> str:
+        """会话级语言偏好的键：同一个人格在不同群里互不干扰"""
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        return f"{umo}|{self_id}"
+
+    def _switchable(self, profile: VoiceProfile | None) -> bool:
+        """该音色是否允许被点播语言
+
+        只有开了「合成前翻译」的音色才谈得上换语言：它本来就是用外语训练的，
+        换个语言顶多口音不同。中文音色被要求说日语只会得到一口怪腔调，所以不参与。
+        """
+
+        return bool(
+            self.cfg.translate.can_switch
+            and profile is not None
+            and profile.translate_target
+        )
+
+    def _pick_lang(
+        self,
+        event: AstrMessageEvent,
+        profile: VoiceProfile | None,
+        explicit: str = "",
+    ) -> str:
+        """决定本次合成用什么语言
+
+        :param explicit: 调用方明确指定的语言（LLM 工具参数 / 指令），优先级最高
+        :return: 语言代码；返回空串表示沿用音色档案的默认语言
+        """
+
+        if profile is None:
+            return ""
+
+        want = str(explicit or "").strip().lower()
+        if want:
+            return want if (want in LANG_CODES and self._switchable(profile)) else ""
+
+        if not self._switchable(profile):
+            return ""
+
+        key = self._session_key(event, self._self_id(event))
+        remembered = self.lang_gate.get(key)
+        if remembered:
+            return remembered
+
+        request = parse_lang_request(
+            getattr(event, "message_str", "") or "", profile.translate_target
+        )
+        if request is None:
+            return ""
+
+        name = LANG_NAMES.get(request.lang, request.lang)
+        if request.sticky and self.lang_gate.set(key, request.lang):
+            logger.info(f"[{profile.name}] 群友要求改用{name}，本会话已记住")
+        else:
+            logger.info(f"[{profile.name}] 群友要求改用{name}（仅本次）")
+        return request.lang
 
     @staticmethod
     def _speech_error(res: GSVRequestResult, prefix: str = "已放弃转语音") -> str:
@@ -129,26 +195,32 @@ class GPTSoVITSPlugin(Star):
         event: AstrMessageEvent,
         text: str,
         profile: VoiceProfile | None,
+        target_lang: str = "",
     ) -> tuple[str, str | None]:
-        """按音色档案决定送去合成的文本
+        """按音色档案与本次语言意图决定送去合成的文本
 
-        档案开启「合成前翻译」时，先把文本翻成该档案 `text_lang` 指定的语言，
-        这样日语音色就能用母语发音（中文回复仍原样保留）。
+        默认按档案自己的 `text_lang` 发音（开了「合成前翻译」时先把回复翻成该语言）。
+        群友点名换语言、或模型自己指定语言时，`target_lang` 会临时覆盖档案默认语言。
 
+        :param target_lang: 本次要用的语言，空串表示沿用档案默认
         :return: (合成用文本, 需要覆盖的 text_lang)，不需要覆盖时第二项为 None
         """
 
         if not text or profile is None:
             return text, None
 
-        target = profile.translate_target
+        target = str(target_lang or "").strip().lower() or profile.translate_target
         if not target:
             return text, None
 
         source = detect_lang(text)
-        # 语言无法判断（纯符号 / emoji / 数字）或已经是对应语言，直接合成
-        if not source or source == target:
+        # 语言无法判断（纯符号 / emoji / 数字）时按档案默认走
+        if not source:
             return text, None
+
+        # 已经是目标语言：不必翻译，但档案默认语言不同时要显式指出来
+        if source == target:
+            return text, (target if target != profile.text_lang else None)
 
         translated = await self.translator.translate(event, text, target, profile)
         if not translated or translated == text:
@@ -216,6 +288,8 @@ class GPTSoVITSPlugin(Star):
             return
 
         params = await self._get_emotion_params(event, combined_text, profile)
+        # 群友点名换语言时走这个；没被点名就是空串，按档案默认语言发音
+        want_lang = self._pick_lang(event, profile)
 
         new_chain = []
         for seg in result.chain:
@@ -226,7 +300,7 @@ class GPTSoVITSPlugin(Star):
 
             try:
                 speech_text, lang_override = await self._prepare_speech_text(
-                    event, seg.text, profile
+                    event, seg.text, profile, want_lang
                 )
                 seg_params = dict(params) if params else {}
                 if lang_override:
@@ -234,7 +308,8 @@ class GPTSoVITSPlugin(Star):
 
                 logger.info(
                     f"[{profile.name if profile else '默认音色'}] "
-                    f"将回复转为语音（{len(speech_text)} 字）"
+                    f"将回复转为语音（{len(speech_text)} 字"
+                    f"{'，' + lang_override if lang_override else ''}）"
                 )
                 res = await self.service.inference(
                     speech_text, extra_params=seg_params, profile=profile
@@ -272,7 +347,7 @@ class GPTSoVITSPlugin(Star):
             return
 
         speech_text, lang_override = await self._prepare_speech_text(
-            event, text, profile
+            event, text, profile, self._pick_lang(event, profile)
         )
         params = {"text_lang": lang_override} if lang_override else None
         res = await self.service.inference(
@@ -295,8 +370,59 @@ class GPTSoVITSPlugin(Star):
         for profile in self.cfg.profiles:
             await self.service.restart(profile)
 
+    @filter.command("语音语言", alias={"tts_lang"})
+    async def speech_lang(self, event: AstrMessageEvent):
+        """语音语言 [中文|日语|英语|韩语|默认]，切换本会话的语音语言"""
+        if not self.cfg.enabled:
+            return
+
+        profile = self._resolve_profile(event)
+        if not self._voice_allowed(profile):
+            yield event.plain_result("当前机器人未配置音色档案，无法切换语音语言。")
+            return
+
+        key = self._session_key(event, self._self_id(event))
+        arg = event.message_str.partition(" ")[2].strip()
+
+        if not arg:
+            current = self.lang_gate.get(key) or profile.text_lang
+            yield event.plain_result(
+                f"当前语音语言：{LANG_NAMES.get(current, current)}。"
+                "要改的话发「语音语言 中文」，发「语音语言 默认」可以恢复。"
+            )
+            return
+
+        if arg in _RESET_WORDS or arg.lower() in _RESET_WORDS:
+            self.lang_gate.clear(key)
+            default_name = LANG_NAMES.get(profile.text_lang, profile.text_lang)
+            yield event.plain_result(f"已恢复默认语音语言（{default_name}）。")
+            return
+
+        lang = LANG_ALIASES.get(arg) or LANG_ALIASES.get(arg.lower())
+        if not lang:
+            yield event.plain_result("用法：语音语言 中文 / 日语 / 英语 / 韩语 / 默认")
+            return
+
+        if not self._switchable(profile):
+            yield event.plain_result(
+                "当前音色没有开启「合成前翻译」，语言由音色本身决定，无法切换。"
+            )
+            return
+
+        if not self.lang_gate.set(key, lang):
+            yield event.plain_result(
+                "插件配置里的「语音语言记忆时长」是 0，改不了。"
+                "把它设成大于 0 的分钟数再试。"
+            )
+            return
+
+        minutes = self.cfg.translate.switch_ttl_minutes
+        yield event.plain_result(
+            f"好，接下来用{LANG_NAMES.get(lang, lang)}说（{minutes} 分钟内有效）。"
+        )
+
     @filter.llm_tool()
-    async def gsv_tts(self, event: AstrMessageEvent, message: str = ""):
+    async def gsv_tts(self, event: AstrMessageEvent, message: str = "", lang: str = ""):
         """把你要说的话用真人语音发出去，而不是发文字。
 
         以下情况应当调用本工具：
@@ -308,6 +434,7 @@ class GPTSoVITSPlugin(Star):
 
         Args:
             message(string): 要用语音说出的内容。必须是可直接朗读的口语短句，100 字以内，不要带 Markdown、链接或括号内的旁白说明。
+            lang(string): 语音语言，可选。留空(默认)表示说这个音色本来的语言。只有当用户明确要求换语言时才填：zh=中文、ja=日语、en=英语、ko=韩语。例如用户说「用中文说」就填 zh，说「说日语」就填 ja。
         """
         try:
             profile = self._resolve_profile(event)
@@ -326,8 +453,10 @@ class GPTSoVITSPlugin(Star):
                 )
 
             # 情绪匹配用原文（可能是中文），送合成的是翻译后的文本
+            # 语言：模型自己指定 > 群友点名 > 音色默认
+            want_lang = self._pick_lang(event, profile, lang)
             speech_text, lang_override = await self._prepare_speech_text(
-                event, text, profile
+                event, text, profile, want_lang
             )
             params = await self._get_emotion_params(event, text, profile)
             if lang_override:

@@ -117,6 +117,26 @@ class TranslateConfig(ConfigNode):
     """语音翻译配置：把回复翻译成音色要求的语言后再送去合成"""
 
     provider_id: str
+    allow_switch: bool
+    switch_ttl_minutes: int
+
+    def __init__(self, data: MutableMapping[str, Any]):
+        if isinstance(data, MutableMapping):
+            data.setdefault("allow_switch", True)
+            data.setdefault("switch_ttl_minutes", 10)
+        super().__init__(data)
+
+    @property
+    def switch_ttl_seconds(self) -> int:
+        try:
+            minutes = int(self.switch_ttl_minutes or 0)
+        except (TypeError, ValueError):
+            minutes = 0
+        return max(0, minutes) * 60
+
+    @property
+    def can_switch(self) -> bool:
+        return self.allow_switch is not False
 
 
 class VoiceProfile(ConfigNode):

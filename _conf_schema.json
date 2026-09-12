@@ -468,6 +468,18 @@
                 "default": "",
                 "hint": "留空则沿用「LLM 配置」里的提供商，再留空则使用当前默认提供商",
                 "_special": "select_provider"
+            },
+            "allow_switch": {
+                "description": "允许群友点播语音语言",
+                "type": "bool",
+                "default": true,
+                "hint": "默认按音色档案的语言发音（日语音色就说日语）。打开后，群友说「说中文」「用中文说」这类要求时会临时切到中文；另有「语音语言」指令可手动切换。只对开了「合成前翻译」的音色生效。"
+            },
+            "switch_ttl_minutes": {
+                "description": "语言切换记住多久(分钟)",
+                "type": "int",
+                "default": 10,
+                "hint": "被点名换语言后，会话内保持该语言的时间。填 0 表示只在被点名的那一次生效，不记住。"
             }
         }
     },
