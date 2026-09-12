@@ -113,7 +113,17 @@ class GPTSoVITSPlugin(Star):
 
         want = str(explicit or "").strip().lower()
         if want:
-            return want if (want in LANG_CODES and self._switchable(profile)) else ""
+            if want not in LANG_CODES or not self._switchable(profile):
+                return ""
+            # 模型经常会自作主张填 lang：实测「独角兽发条语音」这种完全没提语言的
+            # 消息，它也会填 zh（上下文是中文，它觉得顺理成章），
+            # 于是日语音色张口就是中文。所以显式值必须能在用户消息里找到依据。
+            if self._lang_asked(event, profile):
+                return want
+            logger.info(
+                f"[{profile.name}] 忽略模型自填的语言 {want}"
+                "（本条消息没提语言要求），改用音色默认语言"
+            )
 
         if not self._switchable(profile):
             return ""
@@ -135,6 +145,21 @@ class GPTSoVITSPlugin(Star):
         else:
             logger.info(f"[{profile.name}] 群友要求改用{name}（仅本次）")
         return request.lang
+
+    @staticmethod
+    def _lang_asked(event: AstrMessageEvent, profile: VoiceProfile) -> bool:
+        """用户这条消息里是否真的提了语言要求
+
+        用来给模型自填的 `lang` 参数做背书：只有用户确实说了「用中文说」
+        之类，才认模型填的那个值。
+        """
+
+        return (
+            parse_lang_request(
+                getattr(event, "message_str", "") or "", profile.translate_target
+            )
+            is not None
+        )
 
     @staticmethod
     def _speech_error(res: GSVRequestResult, prefix: str = "已放弃转语音") -> str:
@@ -604,7 +629,7 @@ class GPTSoVITSPlugin(Star):
 
         Args:
             message(string): 要用语音说出的内容。必须是可直接朗读的口语短句，100 字以内，不要带 Markdown、链接或括号内的旁白说明。
-            lang(string): 语音语言，可选。留空(默认)表示说这个音色本来的语言。只有当用户明确要求换语言时才填：zh=中文、ja=日语、en=英语、ko=韩语。例如用户说「用中文说」就填 zh，说「说日语」就填 ja。
+            lang(string): 通常留空不填。只有用户在这条消息里明确要求换语言时才填（zh=中文 / ja=日语 / en=英语 / ko=韩语）。用户没提语言时必须留空，留空就是音色本来的语言。
         """
         try:
             profile = self._resolve_profile(event)
