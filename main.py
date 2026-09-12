@@ -47,10 +47,10 @@ class GPTSoVITSPlugin(Star):
         return self.cfg.match_profile(self._self_id(event))
 
     @staticmethod
-    def _to_record(res: GSVRequestResult) -> Record:
+    def _to_record(res: GSVRequestResult, text: str | None = None) -> Record:
         if res.file_path:
             try:
-                return Record.fromFileSystem(res.file_path)
+                return Record.fromFileSystem(res.file_path, text=text)
             except Exception:
                 logger.warning(f"无法读取文件：{res.file_path}, 已忽略")
                 pass
@@ -59,7 +59,7 @@ class GPTSoVITSPlugin(Star):
             raise ValueError("无法获取结果数据")
 
         b64 = base64.urlsafe_b64encode(res.data).decode()
-        return Record.fromBase64(b64)
+        return Record.fromBase64(b64, text=text)
 
 
     async def _get_emotion_params(
@@ -94,48 +94,80 @@ class GPTSoVITSPlugin(Star):
 
     @filter.on_decorating_result(priority=14)
     async def on_decorating_result(self, event: AstrMessageEvent):
-        """消息入口"""
+        """发送前钩子：把机器人即将发出的文本回复转成语音
+
+        走的是「机器人自己的回复」这条路，而不是念外部传入的台词。
+        消息链里的图片、@ 等非文本组件会原样保留；合成失败则退回原文，不会丢消息。
+        """
         if not self.cfg.enabled:
             return
-        cfg = self.cfg.auto
 
+        cfg = self.cfg.auto
         result = event.get_result()
-        if not result:
+        if not result or not result.chain:
             return
-        chain = result.chain
-        if not chain:
-            return
+
+        # 只处理 LLM 产生的结果（机器人的对话回复）
         if cfg.only_llm_result and not result.is_llm_result():
             return
+
+        # 按概率决定是否转语音，tts_prob=1.0 表示每条都转
         if random.random() > cfg.tts_prob:
             return
 
-        # 收集所有Plain文本片段
-        plain_texts = []
-        for seg in chain:
-            if isinstance(seg, Plain):
-                plain_texts.append(seg.text)
-
-        # 仅允许只含有Plain的消息链通过
-        if len(plain_texts) != len(chain):
+        # 参与合成的文本片段（纯空白片段不参与）
+        texts = [
+            seg.text
+            for seg in result.chain
+            if isinstance(seg, Plain) and seg.text and seg.text.strip()
+        ]
+        if not texts:
             return
 
-        # 合并所有Plain文本
-        combined_text = "\n".join(plain_texts)
+        combined_text = "\n".join(texts)
 
-        # 仅允许一定长度以下的文本通过
-        if len(combined_text) > cfg.max_msg_len:
+        # 文本太长就不转，直接原样发文字，避免合成耗时过长
+        if cfg.max_msg_len and len(combined_text) > cfg.max_msg_len:
+            logger.info(
+                f"回复长度 {len(combined_text)} 字超过上限 {cfg.max_msg_len}，"
+                "本次改为直接发送文字"
+            )
             return
 
         profile = self._resolve_profile(event)
         params = await self._get_emotion_params(event, combined_text, profile)
-        res = await self.service.inference(
-            combined_text, extra_params=params, profile=profile
-        )
-        if not bool(res):
-            return
-        chain.clear()
-        chain.append(self._to_record(res))
+
+        new_chain = []
+        for seg in result.chain:
+            if not isinstance(seg, Plain) or not seg.text or not seg.text.strip():
+                # 非文本组件（图片、@、引用等）原样保留
+                new_chain.append(seg)
+                continue
+
+            try:
+                logger.info(
+                    f"[{profile.name if profile else '默认音色'}] "
+                    f"将回复转为语音（{len(seg.text)} 字）"
+                )
+                res = await self.service.inference(
+                    seg.text, extra_params=params, profile=profile
+                )
+                if not bool(res):
+                    logger.error(f"语音合成失败，改为发送原文: {res.error}")
+                    new_chain.append(seg)
+                    continue
+                new_chain.append(self._to_record(res, text=seg.text))
+            except Exception as e:
+                logger.error(f"语音合成异常，改为发送原文: {e}")
+                new_chain.append(seg)
+                continue
+
+            # 双输出：语音之外再保留一份文字
+            if cfg.dual_output:
+                new_chain.append(seg)
+
+        if new_chain:
+            result.chain = new_chain
 
     @filter.command("说", alias={"gsv", "GSV"})
     async def on_command(self, event: AstrMessageEvent):

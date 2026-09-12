@@ -94,6 +94,7 @@ class AutoConfig(ConfigNode):
     only_llm_result: bool
     tts_prob: float
     max_msg_len: int
+    dual_output: bool
 
 
 class ClientConfig(ConfigNode):

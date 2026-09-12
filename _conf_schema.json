@@ -6,37 +6,43 @@
         "default": true
     },
     "auto": {
-        "description": "调用配置",
+        "description": "回复转语音配置",
         "type": "object",
-        "hint": "本插件有一定概率主动将bot本来要发送的文本转成语音发送",
+        "hint": "机器人自己的对话回复（LLM 结果）会在发送前被转成语音发出去；图片、@ 等非文本内容原样保留。注意：一个 GPT-SoVITS 实例同一时间只能常驻一套音色，多音色请配合下方的「音色档案」使用",
         "items": {
             "only_llm_result": {
                 "description": "只处理LLM结果",
                 "type": "bool",
-                "hint": "只处理 LLM 返回的消息。建议打开",
+                "hint": "只处理 LLM 返回的对话回复，指令类回复（如 /help）保持文字。建议打开",
                 "default": true
             },
             "tts_prob": {
-                "description": "主动转语音发送的概率",
+                "description": "回复转语音的概率",
                 "type": "float",
-                "hint": "",
+                "hint": "1.0 = 机器人每一条回复都转成语音；0.15 = 只有约 15% 的回复转语音，其余发文字",
                 "slider": {
                     "min": 0,
                     "max": 1,
                     "step": 0.01
                 },
-                "default": 0.15
+                "default": 1.0
             },
             "max_msg_len": {
-                "description": "文本长度限制",
+                "description": "转语音的长度上限",
                 "type": "int",
-                "hint": "超过此长度的文本不会被转成语音发送",
+                "hint": "超过此长度的回复不转语音，直接发文字。文字越长合成越慢（本机实测合成耗时约为音频时长的 2 倍），建议 100~150",
                 "slider": {
                     "min": 0,
-                    "max": 200,
+                    "max": 500,
                     "step": 1
                 },
-                "default": 50
+                "default": 150
+            },
+            "dual_output": {
+                "description": "语音与文字同时发送",
+                "type": "bool",
+                "hint": "关闭时只发语音；打开后同一条回复会先发语音、再发一遍文字，方便没开声音时阅读。合成速度不变（两条是一起发出的）",
+                "default": false
             }
         }
     },

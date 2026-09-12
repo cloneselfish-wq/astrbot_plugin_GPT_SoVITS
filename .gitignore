@@ -10,3 +10,6 @@ settings/
 logs/
 *.log
 cache/
+
+# 本地工作数据（记忆、临时文件）
+.workbuddy/
