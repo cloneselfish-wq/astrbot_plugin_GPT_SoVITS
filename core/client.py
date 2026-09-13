@@ -47,6 +47,15 @@ class GSVApiClient:
     # 用户很难察觉是服务没起还是单纯慢。
     DOWN_COOLDOWN = 60
 
+    #: 中文语速约 4.5 字/秒，合成耗时约为音频时长的 2 倍（实测），
+    #: 用它按文本长度估算一次合成大概要多久。
+    CHARS_PER_SEC = 4.5
+    SYNTH_FACTOR = 2.0
+    #: 估算时额外留的余量（秒）
+    TIMEOUT_MARGIN = 30
+    #: 动态放宽后的硬顶（秒）：再长也不超过这个值，避免请求永远挂在那
+    MAX_TIMEOUT = 600
+
     def __init__(self, base_url: str, timeout: int = 60):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -84,6 +93,22 @@ class GSVApiClient:
         if self.session:
             await self.session.close()
 
+    def _timeout_for(self, text: str) -> ClientTimeout:
+        """按待合成文本的长度放宽这一次请求的超时。
+
+        配置里的 `client.timeout` 是按「一句话」估的（默认 60 秒）。私聊不再
+        限制长度后，长文本按配置值必然超时——所以这里按长度线性放大，
+        配置值只当下限，短文本的行为完全不变。
+        """
+
+        total = float(self.timeout or 60)
+        if text:
+            estimate = len(text) / self.CHARS_PER_SEC * self.SYNTH_FACTOR
+            total = max(
+                total, min(estimate + self.TIMEOUT_MARGIN, float(self.MAX_TIMEOUT))
+            )
+        return ClientTimeout(total=total, connect=5, sock_connect=5)
+
     async def _request(
         self,
         url: str,
@@ -109,7 +134,9 @@ class GSVApiClient:
             )
 
         try:
-            async with self.session.get(url, params=params) as resp:
+            async with self.session.get(
+                url, params=params, timeout=self._timeout_for(request_text)
+            ) as resp:
                 # 有响应就说明服务活着（哪怕状态码不是 200）
                 self.mark_ok()
 

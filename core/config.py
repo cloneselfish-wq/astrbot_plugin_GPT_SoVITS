@@ -94,6 +94,7 @@ class AutoConfig(ConfigNode):
     only_llm_result: bool
     tts_prob: float
     max_msg_len: int
+    max_msg_len_private: int
     dual_output: bool
     only_configured_bots: bool
     voice_on_request: bool
@@ -103,7 +104,23 @@ class AutoConfig(ConfigNode):
         if isinstance(data, MutableMapping):
             data.setdefault("voice_on_request", True)
             data.setdefault("zh_text_on_foreign_voice", True)
+            # 私聊是一对一场景，长语音只影响对话双方，默认不限制长度；
+            # 群聊里长语音会刷屏打扰别人，仍按 max_msg_len 拦。
+            data.setdefault("max_msg_len_private", 0)
         super().__init__(data)
+
+    def len_limit(self, private: bool = False) -> int:
+        """当前会话允许转语音的文本长度上限，0 表示不限制。
+
+        私聊走 max_msg_len_private（默认 0 = 不限），群聊走 max_msg_len。
+        两个值都按「非负整数」读取，配置里填了空值/负数时退化为 0。
+        """
+
+        value = self.max_msg_len_private if private else self.max_msg_len
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
 
 
 class ClientConfig(ConfigNode):

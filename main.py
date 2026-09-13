@@ -52,6 +52,24 @@ class GPTSoVITSPlugin(Star):
             self_id = getattr(event, "self_id", "")
         return str(self_id or "").strip()
 
+    @staticmethod
+    def _is_private_chat(event: AstrMessageEvent) -> bool:
+        """当前会话是不是私聊。
+
+        群聊一定带 group_id，先看它；再看平台自己的判定。两个判据都拿不到时
+        按群聊处理——群里发超长语音是刷屏，比私聊里少说一句严重得多。
+        """
+
+        try:
+            if str(event.get_group_id() or "").strip():
+                return False
+        except Exception:
+            pass
+        try:
+            return bool(event.is_private_chat())
+        except Exception:
+            return False
+
     def _resolve_profile(self, event: AstrMessageEvent) -> VoiceProfile | None:
         return self.cfg.match_profile(self._self_id(event))
 
@@ -454,11 +472,14 @@ class GPTSoVITSPlugin(Star):
 
         combined_text = "\n".join(texts)
 
-        # 文本太长就不转，直接原样发文字，避免合成耗时过长
-        if cfg.max_msg_len and len(combined_text) > cfg.max_msg_len:
+        # 文本太长就不转，直接原样发文字，避免合成耗时过长。
+        # 私聊是一对一场景，长语音只影响对话双方，默认不限制；群聊仍按上限拦。
+        private = self._is_private_chat(event)
+        limit = cfg.len_limit(private)
+        if limit and len(combined_text) > limit:
             logger.info(
-                f"回复长度 {len(combined_text)} 字超过上限 {cfg.max_msg_len}，"
-                "本次改为直接发送文字"
+                f"{'私聊' if private else '群聊'}回复长度 {len(combined_text)} 字"
+                f"超过上限 {limit}，本次改为直接发送文字"
             )
             return
 
@@ -628,7 +649,7 @@ class GPTSoVITSPlugin(Star):
         调用成功后不要在文字里重复同一句话，简短附和一下就好（也不要再发一遍语音）。
 
         Args:
-            message(string): 要用语音说出的内容。必须是可直接朗读的口语短句，100 字以内，不要带 Markdown、链接或括号内的旁白说明。
+            message(string): 要用语音说出的内容。必须是可直接朗读的口语短句，不要带 Markdown、链接或括号内的旁白说明。群聊里尽量控制在 100 字以内，私聊里可以说得更长。
             lang(string): 通常留空不填。只有用户在这条消息里明确要求换语言时才填（zh=中文 / ja=日语 / en=英语 / ko=韩语）。用户没提语言时必须留空，留空就是音色本来的语言。
         """
         try:
@@ -640,7 +661,9 @@ class GPTSoVITSPlugin(Star):
             if not text:
                 return "没有提供要朗读的内容，请把要说的话填进 message 参数。"
 
-            limit = self.cfg.auto.max_msg_len
+            # 长度上限分场景：私聊默认不限制，群聊按 max_msg_len 拦
+            private = self._is_private_chat(event)
+            limit = self.cfg.auto.len_limit(private)
             if limit and len(text) > limit:
                 return (
                     f"内容过长（{len(text)} 字，上限 {limit} 字），"
